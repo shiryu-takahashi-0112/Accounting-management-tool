@@ -149,6 +149,15 @@ if(xr(e,"index.xml"))throw new Error("Unsupported NUMBERS 09 file");throw new Er
   .month-check-row input[type=checkbox]:disabled + span{color:var(--muted);}
   .modeToggle button{border-radius:6px;}
   .modeToggle button.active{background:var(--accent); color:#fff;}
+  .mfme-overlay{position:fixed; inset:0; background:rgba(20,26,45,.55); z-index:200; display:flex; align-items:flex-start; justify-content:center; padding:28px 16px; overflow-y:auto;}
+  .mfme-panel{background:var(--card); border-radius:12px; width:100%; max-width:980px; padding:22px 24px; box-shadow:0 12px 40px rgba(0,0,0,.3);}
+  .mfme-panel-head{display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:4px;}
+  .mfme-panel-head h2{margin:0;}
+  .mfme-table td, .mfme-table th{white-space:nowrap;}
+  .mfme-table td.wrap{white-space:normal;}
+  tr.mfme-row-off{opacity:.42;}
+  .mfme-amt-neg{color:var(--bad);}
+  .mfme-amt-pos{color:var(--good);}
 </style>
 </head>
 <body>
@@ -509,7 +518,7 @@ if(xr(e,"index.xml"))throw new Error("Unsupported NUMBERS 09 file");throw new Er
     </div>
     <div class="card">
       <h2>CSV / Excelインポート</h2>
-      <p class="muted">CSVエクスポートと同じ列構成（事業／区分／科目区分／主科目／科目名／対象月／予算実績／金額）のCSVファイル、またはExcelファイル（.xlsx / .xls）を取り込みます。1行目はヘッダー行として扱われます。存在しない事業名・科目名は自動で新規作成されます。同一の事業・科目・対象月・予算実績の組み合わせが既に存在する場合は金額を上書きします。</p>
+      <p class="muted">CSVエクスポートと同じ列構成（事業／区分／科目区分／主科目／科目名／対象月／予算実績／金額）のCSVファイル、またはExcelファイル（.xlsx / .xls）を取り込みます。1行目はヘッダー行として扱われます。存在しない事業名・科目名は自動で新規作成されます。同一の事業・科目・対象月・予算実績の組み合わせが既に存在する場合は金額を上書きします。マネーフォワードME（家計簿）から書き出した取引明細CSVもそのまま選択できます。その場合は取り込み前に確認画面が開き、取引ごとに「事業用（確定申告対象）」かどうかを選んでから実績（月次合計）として反映します。大項目・中項目は勘定科目・補助科目として自動生成されます。</p>
       <div class="row">
         <button class="btn secondary" onclick="document.getElementById('csv-import-file').click()">ファイルを選択してインポート</button>
         <input type="file" id="csv-import-file" accept=".csv,.xlsx,.xls" style="display:none" onchange="importCsvOrExcel(event)">
@@ -1940,6 +1949,17 @@ function parseCsvText(text){
   if(field.length || row.length){ row.push(field); rows.push(row); }
   return rows.filter(r => r.length > 1 || (r[0]||'').trim() !== '');
 }
+async function decodeCsvFile(file){
+  // マネーフォワードMEなど、多くの家計簿・会計ソフトはCSVをShift_JIS(Windows-31J)で
+  // 書き出すため、まずUTF-8として厳密デコードを試み、失敗したらShift_JISとして読む。
+  const buf = await file.arrayBuffer();
+  try{
+    return new TextDecoder('utf-8', {fatal:true}).decode(buf);
+  }catch(e){
+    try{ return new TextDecoder('shift_jis').decode(buf); }
+    catch(e2){ return new TextDecoder('utf-8').decode(buf); }
+  }
+}
 async function readImportRows(file){
   const ext = (file.name.split('.').pop()||'').toLowerCase();
   if(ext === 'xlsx' || ext === 'xls'){
@@ -1948,17 +1968,30 @@ async function readImportRows(file){
     const sheet = wb.Sheets[wb.SheetNames[0]];
     return XLSX.utils.sheet_to_json(sheet, {header:1, defval:'', raw:true});
   }
-  const text = await file.text();
+  const text = await decodeCsvFile(file);
   return parseCsvText(text);
+}
+// マネーフォワードME（家計簿アプリ）の取引明細エクスポート形式:
+// 計算対象,日付,内容,金額（円）,保有金融機関,大項目,中項目,メモ,振替,ID
+function isMfmeHeader(row){
+  const h = (row||[]).map(c=>String(c||'').trim());
+  return h[0]==='計算対象' && h[1]==='日付' && h[5]==='大項目' && h[6]==='中項目';
 }
 async function importCsvOrExcel(evt){
   const file = evt.target.files[0];
   if(!file) return;
-  if(!confirm('現在のデータに、インポートしたデータを統合します（同一の事業・科目・対象月・予算実績の組み合わせは金額が上書きされます）。よろしいですか？')){ evt.target.value=''; return; }
   let rows;
   try{ rows = await readImportRows(file); }
   catch(err){ toast('ファイルの読み込みに失敗しました: ' + (err.message||'')); evt.target.value=''; return; }
   if(!rows.length){ toast('データが見つかりませんでした'); evt.target.value=''; return; }
+
+  if(isMfmeHeader(rows[0])){
+    evt.target.value = '';
+    openMfmeImportReview(rows, file.name);
+    return;
+  }
+
+  if(!confirm('現在のデータに、インポートしたデータを統合します（同一の事業・科目・対象月・予算実績の組み合わせは金額が上書きされます）。よろしいですか？')){ evt.target.value=''; return; }
 
   // detect & skip a header row (first cell matches expected header label, or first data-looking row otherwise starts from row 0)
   let startIdx = 0;
@@ -2024,6 +2057,175 @@ async function importCsvOrExcel(evt){
   renderAll();
   toast(`インポート完了：事業${bizCreated}件・科目${accCreated}件を新規作成、金額${entriesUpserted}件を反映${skipped?`（${skipped}行スキップ）`:''}`);
 }
+
+/* ---- マネーフォワードME 取引明細インポート ----
+   計算対象/振替を手がかりに「事業用（確定申告対象）」候補をあらかじめチェックしておき、
+   ユーザーが確認画面で行ごとに選び直してから実績（月次合計）として取り込む。
+   大項目は勘定科目（sga）または売上高、中項目は補助科目として自動生成する。 */
+let mfmeImport = null;
+function mfmeMonthFromDate(s){
+  const m = String(s||'').trim().match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})$/);
+  if(!m) return null;
+  return `${m[1]}-${String(m[2]).padStart(2,'0')}`;
+}
+function mfmeParseRow(r){
+  const calcTarget = String(r[0]!=null?r[0]:'').trim();
+  const dateStr = String(r[1]||'').trim();
+  const content = String(r[2]||'').trim();
+  const amount = Number(String(r[3]!=null?r[3]:'').replace(/,/g,''));
+  const major = String(r[5]||'').trim();
+  const minor = String(r[6]||'').trim();
+  const transfer = String(r[8]!=null?r[8]:'').trim();
+  const month = mfmeMonthFromDate(dateStr);
+  if(!month || !isFinite(amount) || amount===0) return null;
+  const isRevenue = major === '収入';
+  const category = isRevenue ? 'revenue' : 'sga';
+  const parentName = isRevenue ? null : (major || '未分類');
+  const accName = minor || major || '未分類';
+  // sga（費用）は「金額が大きいほど費用計上額が増える」向きに正の値で保持する。
+  // 収入はMF ME上でも正の値なのでそのまま使う。
+  const signedAmount = isRevenue ? amount : -amount;
+  const businessUse = (transfer !== '1') && (calcTarget === '1');
+  return {dateStr, month, content, major, minor, amount, category, parentName, accName, signedAmount, businessUse};
+}
+function openMfmeImportReview(rows, fileName){
+  const parsed = [];
+  for(let i=1;i<rows.length;i++){
+    const p = mfmeParseRow(rows[i]);
+    if(p) parsed.push(p);
+  }
+  if(!parsed.length){ toast('取り込めるデータが見つかりませんでした'); return; }
+  parsed.sort((a,b)=> a.dateStr===b.dateStr ? 0 : (a.dateStr<b.dateStr?-1:1));
+  mfmeImport = { fileName, rows: parsed, businessId: currentBusinessId || (state.businesses[0] && state.businesses[0].id) || null };
+  renderMfmeImportOverlay();
+}
+function mfmeAcctPreview(r){
+  return r.category==='revenue' ? `売上高 ／ ${escapeHtml(r.accName)}` : `販管費 ／ ${escapeHtml(r.parentName)} ＞ ${escapeHtml(r.accName)}`;
+}
+function mfmeSummaryText(){
+  const selected = mfmeImport.rows.filter(r=>r.businessUse);
+  return `選択中：${selected.length} / ${mfmeImport.rows.length}件`;
+}
+function mfmeRowHtml(r, idx){
+  const amtClass = r.amount<0 ? 'mfme-amt-neg' : 'mfme-amt-pos';
+  return `<tr class="${r.businessUse?'':'mfme-row-off'}" id="mfme-row-${idx}">
+    <td><input type="checkbox" ${r.businessUse?'checked':''} onchange="toggleMfmeRow(${idx}, this.checked)"></td>
+    <td>${escapeHtml(r.dateStr)}</td>
+    <td class="wrap">${escapeHtml(r.content)}</td>
+    <td>${escapeHtml(r.major)}</td>
+    <td>${escapeHtml(r.minor)}</td>
+    <td style="text-align:right" class="${amtClass}">${fmt(r.amount)}</td>
+    <td class="wrap muted">${mfmeAcctPreview(r)}</td>
+  </tr>`;
+}
+function renderMfmeImportOverlay(){
+  let el = document.getElementById('mfme-overlay');
+  if(!el){
+    el = document.createElement('div');
+    el.id = 'mfme-overlay';
+    el.className = 'mfme-overlay';
+    document.body.appendChild(el);
+  }
+  if(!mfmeImport){ el.remove(); return; }
+  el.innerHTML = `
+    <div class="mfme-panel">
+      <div class="mfme-panel-head">
+        <h2>マネーフォワードME 取り込み確認</h2>
+        <button class="btn secondary sm" type="button" onclick="closeMfmeImport()">閉じる</button>
+      </div>
+      <p class="muted">${escapeHtml(mfmeImport.fileName)} から${mfmeImport.rows.length}件の取引を読み込みました。チェックした「事業用」の取引のみを、科目ごとの月次合計として実績に反映します。振替・家計簿の計算対象外だった取引はデフォルトで除外しています。内容を確認し、必要に応じてチェックを調整してください。同一科目・対象月に既存の実績金額がある場合は、今回の内容で上書きされます。</p>
+      <div class="row" style="margin-bottom:10px">
+        <div class="field"><label>取り込み先の事業</label>
+          <select id="mfme-biz-select" onchange="mfmeImport.businessId=Number(this.value)">
+            ${state.businesses.map(b=>`<option value="${b.id}" ${b.id===mfmeImport.businessId?'selected':''}>${escapeHtml(b.name)}</option>`).join('')}
+          </select>
+        </div>
+        <button class="btn secondary sm" type="button" onclick="toggleMfmeAll(true)">すべて選択</button>
+        <button class="btn secondary sm" type="button" onclick="toggleMfmeAll(false)">すべて解除</button>
+        <div class="muted" id="mfme-summary" style="margin-left:auto">${mfmeSummaryText()}</div>
+      </div>
+      <div class="table-scroll" style="max-height:420px;overflow-y:auto">
+        <table class="wide mfme-table">
+          <thead><tr><th>事業用</th><th>日付</th><th class="wrap">内容</th><th>大項目</th><th>中項目</th><th>金額</th><th class="wrap">反映先科目</th></tr></thead>
+          <tbody id="mfme-rows-body">${mfmeImport.rows.map((r,i)=>mfmeRowHtml(r,i)).join('')}</tbody>
+        </table>
+      </div>
+      <div class="row" style="margin-top:14px;justify-content:flex-end">
+        <button class="btn secondary" type="button" onclick="closeMfmeImport()">キャンセル</button>
+        <button class="btn" type="button" onclick="confirmMfmeImport()">選択した取引を実績に取り込む</button>
+      </div>
+    </div>
+  `;
+}
+function toggleMfmeRow(idx, checked){
+  if(!mfmeImport) return;
+  mfmeImport.rows[idx].businessUse = !!checked;
+  const tr = document.getElementById('mfme-row-'+idx);
+  if(tr) tr.classList.toggle('mfme-row-off', !checked);
+  const summary = document.getElementById('mfme-summary');
+  if(summary) summary.textContent = mfmeSummaryText();
+}
+function toggleMfmeAll(checked){
+  if(!mfmeImport) return;
+  mfmeImport.rows.forEach(r=>r.businessUse=checked);
+  renderMfmeImportOverlay();
+}
+function closeMfmeImport(){
+  mfmeImport = null;
+  const el = document.getElementById('mfme-overlay');
+  if(el) el.remove();
+}
+async function resolveOrCreateImportAccount(category, parentName, accName, accKeyMap){
+  let parentId = null;
+  if(parentName){
+    const parentKey = `${category}|${''}|${parentName}`;
+    parentId = accKeyMap.get(parentKey);
+    if(parentId === undefined){
+      const rec = {category, name:parentName, order: accountsByCat(category).length, parentId:null};
+      parentId = await add('accounts', rec);
+      rec.id = parentId; state.accounts.push(rec); accKeyMap.set(parentKey, parentId);
+    }
+  }
+  const accKey = `${category}|${parentId||''}|${accName}`;
+  let accId = accKeyMap.get(accKey);
+  if(accId === undefined){
+    const rec = {category, name:accName, order: accountsByCat(category).length, parentId};
+    accId = await add('accounts', rec);
+    rec.id = accId; state.accounts.push(rec); accKeyMap.set(accKey, accId);
+  }
+  return accId;
+}
+async function confirmMfmeImport(){
+  if(!mfmeImport) return;
+  const bizId = mfmeImport.businessId;
+  if(!bizId){ toast('取り込み先の事業を選択してください'); return; }
+  const selected = mfmeImport.rows.filter(r=>r.businessUse);
+  if(!selected.length){ toast('事業用として選択された取引がありません'); return; }
+  if(!confirm(`選択した${selected.length}件の取引を、科目ごとの月次合計として実績に取り込みます。同一科目・対象月の既存の実績金額は上書きされます。よろしいですか？`)) return;
+
+  const groups = new Map(); // key -> {category,parentName,accName,month,sum}
+  selected.forEach(r=>{
+    const key = `${r.category}|${r.parentName||''}|${r.accName}|${r.month}`;
+    const g = groups.get(key) || {category:r.category, parentName:r.parentName, accName:r.accName, month:r.month, sum:0};
+    g.sum += r.signedAmount;
+    groups.set(key, g);
+  });
+
+  const accKeyMap = new Map(state.accounts.map(a=>[`${a.category}|${a.parentId||''}|${a.name}`, a.id]));
+  const accCountBefore = state.accounts.length;
+  let entriesUpserted = 0;
+  for(const g of groups.values()){
+    const accId = await resolveOrCreateImportAccount(g.category, g.parentName, g.accName, accKeyMap);
+    await saveEntry(bizId, accId, g.month, 'actual', g.sum);
+    entriesUpserted++;
+  }
+  const accCreated = state.accounts.length - accCountBefore;
+
+  closeMfmeImport();
+  renderAll();
+  toast(`マネーフォワードMEデータの取り込みが完了しました：科目${accCreated}件を新規作成、${entriesUpserted}件の実績を反映しました`);
+}
+
 function exportCSV(){
   const bizSel = document.getElementById('csv-biz').value;
   const rows = [['事業','区分','科目区分','主科目','科目名','対象月','予算実績','金額']];
