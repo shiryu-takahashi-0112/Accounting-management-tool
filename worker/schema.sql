@@ -44,7 +44,13 @@ CREATE TABLE IF NOT EXISTS invites (
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   expires_at TEXT NOT NULL,
   accepted_by INTEGER REFERENCES users(id),
-  accepted_at TEXT
+  accepted_at TEXT,
+  -- Optional: if set, this invite is scoped to a single business. On accept,
+  -- the invited user is still added to the workspace (data is shared at the
+  -- workspace level), but that business is switched into "restricted" mode
+  -- (see business_members below) with the invitee added to it, so they're
+  -- guaranteed access to this business specifically.
+  business_id INTEGER REFERENCES businesses(id) ON DELETE SET NULL
 );
 CREATE INDEX IF NOT EXISTS idx_invites_workspace ON invites(workspace_id);
 
