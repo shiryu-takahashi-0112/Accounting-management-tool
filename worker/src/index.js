@@ -209,11 +209,31 @@ const handleMe = requireAuth(async (request, env, ctx, params, user) => {
 });
 
 /* ============ bulk data ============ */
+// A business with no rows in business_members is open to every workspace
+// member. Once restricted (>=1 row), only the workspace owner and the
+// assigned users can see it. This SQL fragment expresses that per business
+// row; bind workspace_id then user_id (twice: once for businesses, once
+// for entries' business subquery) as needed by the caller.
+const VISIBLE_BUSINESS_SQL = `(
+  NOT EXISTS (SELECT 1 FROM business_members bm WHERE bm.business_id = b.id)
+  OR EXISTS (SELECT 1 FROM business_members bm WHERE bm.business_id = b.id AND bm.user_id = ?)
+)`;
+
 const handleGetData = requireAuth(async (request, env, ctx, params, user) => {
+  const isOwner = user.role === 'owner';
   const [businesses, accounts, entries] = await Promise.all([
-    env.DB.prepare('SELECT * FROM businesses WHERE workspace_id = ? ORDER BY id').bind(user.workspaceId).all(),
+    isOwner
+      ? env.DB.prepare('SELECT * FROM businesses WHERE workspace_id = ? ORDER BY id').bind(user.workspaceId).all()
+      : env.DB.prepare(
+          `SELECT b.* FROM businesses b WHERE b.workspace_id = ? AND ${VISIBLE_BUSINESS_SQL} ORDER BY b.id`
+        ).bind(user.workspaceId, user.userId).all(),
     env.DB.prepare('SELECT * FROM accounts WHERE workspace_id = ? ORDER BY id').bind(user.workspaceId).all(),
-    env.DB.prepare('SELECT * FROM entries WHERE workspace_id = ? ORDER BY id').bind(user.workspaceId).all(),
+    isOwner
+      ? env.DB.prepare('SELECT * FROM entries WHERE workspace_id = ? ORDER BY id').bind(user.workspaceId).all()
+      : env.DB.prepare(
+          `SELECT e.* FROM entries e JOIN businesses b ON b.id = e.business_id
+           WHERE e.workspace_id = ? AND ${VISIBLE_BUSINESS_SQL} ORDER BY e.id`
+        ).bind(user.workspaceId, user.userId).all(),
   ]);
   return json({
     businesses: businesses.results.map(bizToApi),
@@ -223,6 +243,18 @@ const handleGetData = requireAuth(async (request, env, ctx, params, user) => {
 });
 
 /* ============ businesses ============ */
+// Returns true if the given business is visible to this user: the workspace
+// owner can always access every business; a non-owner member can access it
+// only if the business is unrestricted (no business_members rows) or they're
+// explicitly assigned to it.
+async function canAccessBusiness(env, user, businessId) {
+  if (user.role === 'owner') return true;
+  const row = await env.DB.prepare(
+    `SELECT 1 FROM businesses b WHERE b.id = ? AND b.workspace_id = ? AND ${VISIBLE_BUSINESS_SQL}`
+  ).bind(businessId, user.workspaceId, user.userId).first();
+  return !!row;
+}
+
 const handleCreateBusiness = requireAuth(async (request, env, ctx, params, user) => {
   const b = await readJson(request);
   if (!b || !b.name) return errorResponse('事業名が必要です。');
@@ -237,6 +269,7 @@ const handleUpdateBusiness = requireAuth(async (request, env, ctx, params, user)
   const id = Number(params.id);
   const owned = await env.DB.prepare('SELECT id FROM businesses WHERE id = ? AND workspace_id = ?').bind(id, user.workspaceId).first();
   if (!owned) return errorResponse('対象の事業が見つかりません。', 404);
+  if (!(await canAccessBusiness(env, user, id))) return errorResponse('この事業へのアクセス権がありません。', 403);
   const b = await readJson(request);
   if (!b) return errorResponse('リクエストの形式が正しくありません。');
   const taxSettings = b.taxSettings ? JSON.stringify(b.taxSettings) : null;
@@ -248,6 +281,7 @@ const handleUpdateBusiness = requireAuth(async (request, env, ctx, params, user)
 });
 const handleDeleteBusiness = requireAuth(async (request, env, ctx, params, user) => {
   const id = Number(params.id);
+  if (!(await canAccessBusiness(env, user, id))) return errorResponse('この事業へのアクセス権がありません。', 403);
   await env.DB.prepare('DELETE FROM businesses WHERE id = ? AND workspace_id = ?').bind(id, user.workspaceId).run();
   return json({ ok: true });
 });
@@ -286,6 +320,7 @@ const handleCreateEntry = requireAuth(async (request, env, ctx, params, user) =>
   if (!e || !e.businessId || !e.accountId || !e.month || !e.kind) {
     return errorResponse('必要な項目が不足しています。');
   }
+  if (!(await canAccessBusiness(env, user, e.businessId))) return errorResponse('この事業へのアクセス権がありません。', 403);
   const res = await env.DB.prepare(
     'INSERT INTO entries (workspace_id, business_id, account_id, month, kind, amount) VALUES (?, ?, ?, ?, ?, ?)'
   ).bind(user.workspaceId, e.businessId, e.accountId, e.month, e.kind, e.amount || 0).run();
@@ -294,10 +329,12 @@ const handleCreateEntry = requireAuth(async (request, env, ctx, params, user) =>
 });
 const handleUpdateEntry = requireAuth(async (request, env, ctx, params, user) => {
   const id = Number(params.id);
-  const owned = await env.DB.prepare('SELECT id FROM entries WHERE id = ? AND workspace_id = ?').bind(id, user.workspaceId).first();
+  const owned = await env.DB.prepare('SELECT id, business_id FROM entries WHERE id = ? AND workspace_id = ?').bind(id, user.workspaceId).first();
   if (!owned) return errorResponse('対象のデータが見つかりません。', 404);
+  if (!(await canAccessBusiness(env, user, owned.business_id))) return errorResponse('この事業へのアクセス権がありません。', 403);
   const e = await readJson(request);
   if (!e) return errorResponse('リクエストの形式が正しくありません。');
+  if (!(await canAccessBusiness(env, user, e.businessId))) return errorResponse('この事業へのアクセス権がありません。', 403);
   await env.DB.prepare(
     'UPDATE entries SET business_id = ?, account_id = ?, month = ?, kind = ?, amount = ? WHERE id = ? AND workspace_id = ?'
   ).bind(e.businessId, e.accountId, e.month, e.kind, e.amount || 0, id, user.workspaceId).run();
@@ -306,6 +343,8 @@ const handleUpdateEntry = requireAuth(async (request, env, ctx, params, user) =>
 });
 const handleDeleteEntry = requireAuth(async (request, env, ctx, params, user) => {
   const id = Number(params.id);
+  const owned = await env.DB.prepare('SELECT business_id FROM entries WHERE id = ? AND workspace_id = ?').bind(id, user.workspaceId).first();
+  if (owned && !(await canAccessBusiness(env, user, owned.business_id))) return errorResponse('この事業へのアクセス権がありません。', 403);
   await env.DB.prepare('DELETE FROM entries WHERE id = ? AND workspace_id = ?').bind(id, user.workspaceId).run();
   return json({ ok: true });
 });
@@ -352,6 +391,40 @@ const handleGetMembers = requireAuth(async (request, env, ctx, params, user) => 
   return json({ members: rows.results.map(r => ({ userId: r.userId, email: r.email, role: r.role, joinedAt: r.joinedAt })) });
 });
 
+/* ---- per-business member access (事業ごとのメンバー管理) ---- */
+const handleGetBusinessMembers = requireAuth(async (request, env, ctx, params, user) => {
+  const businessId = Number(params.id);
+  const biz = await env.DB.prepare('SELECT id FROM businesses WHERE id = ? AND workspace_id = ?')
+    .bind(businessId, user.workspaceId).first();
+  if (!biz) return errorResponse('対象の事業が見つかりません。', 404);
+  const assigned = await env.DB.prepare('SELECT user_id as userId FROM business_members WHERE business_id = ?')
+    .bind(businessId).all();
+  const assignedUserIds = assigned.results.map(r => r.userId);
+  return json({ businessId, restricted: assignedUserIds.length > 0, assignedUserIds });
+});
+
+const handleUpdateBusinessMembers = requireAuth(async (request, env, ctx, params, user) => {
+  if (user.role !== 'owner') return errorResponse('事業のメンバー設定はオーナーのみ行えます。', 403);
+  const businessId = Number(params.id);
+  const biz = await env.DB.prepare('SELECT id FROM businesses WHERE id = ? AND workspace_id = ?')
+    .bind(businessId, user.workspaceId).first();
+  if (!biz) return errorResponse('対象の事業が見つかりません。', 404);
+  const body = await readJson(request);
+  if (!body || !Array.isArray(body.userIds)) return errorResponse('リクエストの形式が正しくありません。');
+  // Only workspace members may be assigned; silently drop anything else.
+  const validMembers = await env.DB.prepare('SELECT user_id as userId FROM workspace_members WHERE workspace_id = ?')
+    .bind(user.workspaceId).all();
+  const validIds = new Set(validMembers.results.map(r => r.userId));
+  const userIds = Array.from(new Set(body.userIds.map(Number).filter(id => validIds.has(id))));
+
+  const stmts = [env.DB.prepare('DELETE FROM business_members WHERE business_id = ?').bind(businessId)];
+  for (const uid of userIds) {
+    stmts.push(env.DB.prepare('INSERT INTO business_members (business_id, user_id) VALUES (?, ?)').bind(businessId, uid));
+  }
+  await env.DB.batch(stmts);
+  return json({ businessId, restricted: userIds.length > 0, assignedUserIds: userIds });
+});
+
 const handleRemoveMember = requireAuth(async (request, env, ctx, params, user) => {
   if (user.role !== 'owner') return errorResponse('メンバーの削除はオーナーのみ行えます。', 403);
   const targetUserId = Number(params.id);
@@ -361,6 +434,10 @@ const handleRemoveMember = requireAuth(async (request, env, ctx, params, user) =
   if (!target) return errorResponse('対象のメンバーが見つかりません。', 404);
   await env.DB.prepare('DELETE FROM workspace_members WHERE workspace_id = ? AND user_id = ?')
     .bind(user.workspaceId, targetUserId).run();
+  // Also drop any per-business access assignments this user had within this workspace.
+  await env.DB.prepare(
+    `DELETE FROM business_members WHERE user_id = ? AND business_id IN (SELECT id FROM businesses WHERE workspace_id = ?)`
+  ).bind(targetUserId, user.workspaceId).run();
   // If the removed member's active workspace was this one, bump them back to
   // a workspace they own so they aren't left pointing at data they can't see.
   const fallback = await env.DB.prepare(
@@ -456,6 +533,8 @@ const ROUTES = [
   ['POST', /^\/api\/businesses$/, handleCreateBusiness],
   ['PUT', /^\/api\/businesses\/(\d+)$/, handleUpdateBusiness],
   ['DELETE', /^\/api\/businesses\/(\d+)$/, handleDeleteBusiness],
+  ['GET', /^\/api\/businesses\/(\d+)\/members$/, handleGetBusinessMembers],
+  ['PUT', /^\/api\/businesses\/(\d+)\/members$/, handleUpdateBusinessMembers],
 
   ['POST', /^\/api\/accounts$/, handleCreateAccount],
   ['PUT', /^\/api\/accounts\/(\d+)$/, handleUpdateAccount],
