@@ -1,0 +1,14 @@
+{
+  "name": "accounting-tool-worker",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "wrangler dev --local",
+    "deploy": "wrangler deploy",
+    "db:apply-local": "wrangler d1 execute accounting_tool --local --file=schema.sql",
+    "db:apply-remote": "wrangler d1 execute accounting_tool --remote --file=schema.sql"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}
