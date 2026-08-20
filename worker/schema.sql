@@ -85,3 +85,16 @@ CREATE TABLE IF NOT EXISTS settings (
   tool_name TEXT,
   logo_data_url TEXT
 );
+
+-- Per-business member access control. A business with NO rows here is open
+-- to every workspace member (backward-compatible default). Once at least one
+-- row exists for a business, only the workspace owner and the listed users
+-- can see/manage that business's data.
+CREATE TABLE IF NOT EXISTS business_members (
+  business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (business_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_business_members_business ON business_members(business_id);
+CREATE INDEX IF NOT EXISTS idx_business_members_user ON business_members(user_id);
