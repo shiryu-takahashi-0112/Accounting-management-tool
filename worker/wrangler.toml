@@ -10,6 +10,4 @@ not_found_handling = "single-page-application"
 [[d1_databases]]
 binding = "DB"
 database_name = "accounting_tool"
-# Replace with the UUID printed by `wrangler d1 create accounting_tool`
-# (see DEPLOY.md). This placeholder is only used for local `wrangler dev`.
-database_id = "00000000-0000-0000-0000-000000000000"
+database_id = "2ceab5de-1525-41ba-bd71-4a4305a22ee5"
