@@ -69,9 +69,9 @@ if(xr(e,"index.xml"))throw new Error("Unsupported NUMBERS 09 file");throw new Er
   header .sub{font-size:12px; opacity:.75;}
   .header-brand{display:flex; align-items:center; gap:12px; cursor:pointer; border-radius:8px; padding:4px 8px; margin:-4px -8px;}
   .header-brand:hover{background:rgba(255,255,255,.08);}
-  .app-logo{height:34px; display:flex; align-items:center; justify-content:flex-start; flex-shrink:0; overflow:hidden;}
+  .app-logo{height:22px; display:flex; align-items:center; justify-content:flex-start; flex-shrink:0; overflow:hidden;}
   .app-logo img{height:100%; width:auto; object-fit:contain; display:block;}
-  .app-logo #app-logo-fallback{width:34px; height:34px; border-radius:9px; background:rgba(255,255,255,.15); display:flex; align-items:center; justify-content:center; font-weight:700; font-size:16px;}
+  .app-logo #app-logo-fallback{width:22px; height:22px; border-radius:7px; background:rgba(255,255,255,.15); display:flex; align-items:center; justify-content:center; font-weight:700; font-size:12px;}
   .header-biz-switch{display:flex; align-items:center; gap:8px; font-size:12.5px;}
   .header-biz-switch label{opacity:.8;}
   .header-biz-switch select{padding:6px 8px; border-radius:6px; border:1px solid rgba(255,255,255,.3); background:rgba(255,255,255,.95); color:var(--text); font-size:13px;}
@@ -460,7 +460,12 @@ if(xr(e,"index.xml"))throw new Error("Unsupported NUMBERS 09 file");throw new Er
     </div>
     <div class="card">
       <h2>メンバー招待</h2>
-      <p class="muted">招待リンクを発行すると、そのリンクを開いて会員登録またはログインした人が、このワークスペースのデータ（事業・PL・CF等）に一緒にアクセスできるようになります。リンクの有効期限は発行から7日間、1回限り使用できます。</p>
+      <p class="muted">招待リンクを発行すると、そのリンクを開いて会員登録またはログインした人が、このワークスペースに参加します。対象事業を指定すると、参加後にその事業へのアクセス権が自動的に確定します（他の未制限の事業は従来どおり全メンバーに公開されたままです。完全にその事業だけに限定したい場合は、参加後に「事業管理」タブの各事業の「メンバー管理」から他の事業も制限してください）。リンクの有効期限は発行から7日間、1回限り使用できます。</p>
+      <div class="field"><label>対象事業（任意）</label>
+        <select id="invite-business-select">
+          <option value="">全事業（ワークスペース全体に参加）</option>
+        </select>
+      </div>
       <div class="row">
         <button class="btn" onclick="createInvite()">招待リンクを発行</button>
       </div>
@@ -2100,15 +2105,24 @@ async function renderMembersTab(){
         return `<tr><td class="label">${escapeHtml(m.email)}${isSelf?' <span class="tag">あなた</span>':''}</td><td>${roleTxt}</td><td>${escapeHtml((m.joinedAt||'').slice(0,10))}</td><td>${removeBtn}</td></tr>`;
       }).join('') + '</tbody></table>';
 
+    const bizSelect = document.getElementById('invite-business-select');
+    if(bizSelect){
+      const prevValue = bizSelect.value;
+      bizSelect.innerHTML = '<option value="">全事業（ワークスペース全体に参加）</option>' +
+        state.businesses.map(b=>`<option value="${b.id}">${escapeHtml(b.name)}のみ</option>`).join('');
+      if(state.businesses.some(b=>String(b.id)===prevValue)) bizSelect.value = prevValue;
+    }
+
     if(!invitesData.invites.length){
       invitesWrap.innerHTML = '<div class="empty">発行済みの招待リンクはありません。</div>';
     } else {
-      invitesWrap.innerHTML = `<table class="wide"><thead><tr><th class="label">発行日</th><th>有効期限</th><th>状態</th></tr></thead><tbody>` +
+      invitesWrap.innerHTML = `<table class="wide"><thead><tr><th class="label">発行日</th><th>対象事業</th><th>有効期限</th><th>状態</th></tr></thead><tbody>` +
         invitesData.invites.map(iv=>{
           let status = '未使用（有効）';
           if(iv.acceptedAt) status = `使用済み（${escapeHtml(iv.acceptedByEmail||'')}）`;
           else if(iv.expired) status = '期限切れ';
-          return `<tr><td class="label">${escapeHtml((iv.createdAt||'').slice(0,10))}</td><td>${escapeHtml((iv.expiresAt||'').slice(0,10))}</td><td>${status}</td></tr>`;
+          const bizTxt = iv.businessName ? escapeHtml(iv.businessName) : '全事業';
+          return `<tr><td class="label">${escapeHtml((iv.createdAt||'').slice(0,10))}</td><td>${bizTxt}</td><td>${escapeHtml((iv.expiresAt||'').slice(0,10))}</td><td>${status}</td></tr>`;
         }).join('') + '</tbody></table>';
     }
   }catch(err){
@@ -2117,7 +2131,9 @@ async function renderMembersTab(){
 }
 async function createInvite(){
   try{
-    const data = await apiFetch('/api/invites', { method:'POST' });
+    const bizSelect = document.getElementById('invite-business-select');
+    const businessId = bizSelect && bizSelect.value ? Number(bizSelect.value) : null;
+    const data = await apiFetch('/api/invites', { method:'POST', body: { businessId } });
     lastInviteToken = data.token;
     const url = `${location.origin}${location.pathname}?invite=${data.token}`;
     document.getElementById('invite-result-link').value = url;
