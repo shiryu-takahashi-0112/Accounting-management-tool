@@ -451,17 +451,27 @@ const handleRemoveMember = requireAuth(async (request, env, ctx, params, user) =
 });
 
 const handleCreateInvite = requireAuth(async (request, env, ctx, params, user) => {
+  const body = await readJson(request).catch(() => null);
+  let businessId = null;
+  if (body && body.businessId != null && body.businessId !== '') {
+    const bizId = Number(body.businessId);
+    const biz = await env.DB.prepare('SELECT id FROM businesses WHERE id = ? AND workspace_id = ?')
+      .bind(bizId, user.workspaceId).first();
+    if (!biz) return errorResponse('対象の事業が見つかりません。', 404);
+    businessId = bizId;
+  }
   const token = randomHex(20);
   const expiresAt = new Date(Date.now() + INVITE_TTL_DAYS * 86400000).toISOString();
-  await env.DB.prepare('INSERT INTO invites (token, workspace_id, created_by, expires_at) VALUES (?, ?, ?, ?)')
-    .bind(token, user.workspaceId, user.userId, expiresAt).run();
-  return json({ token, expiresAt });
+  await env.DB.prepare('INSERT INTO invites (token, workspace_id, created_by, expires_at, business_id) VALUES (?, ?, ?, ?, ?)')
+    .bind(token, user.workspaceId, user.userId, expiresAt, businessId).run();
+  return json({ token, expiresAt, businessId });
 });
 
 const handleListInvites = requireAuth(async (request, env, ctx, params, user) => {
   const rows = await env.DB.prepare(
-    `SELECT i.token as token, i.created_at as createdAt, i.expires_at as expiresAt, i.accepted_at as acceptedAt, u.email as acceptedByEmail
-     FROM invites i LEFT JOIN users u ON u.id = i.accepted_by
+    `SELECT i.token as token, i.created_at as createdAt, i.expires_at as expiresAt, i.accepted_at as acceptedAt, u.email as acceptedByEmail,
+            i.business_id as businessId, b.name as businessName
+     FROM invites i LEFT JOIN users u ON u.id = i.accepted_by LEFT JOIN businesses b ON b.id = i.business_id
      WHERE i.workspace_id = ? ORDER BY i.created_at DESC LIMIT 50`
   ).bind(user.workspaceId).all();
   return json({
@@ -472,6 +482,8 @@ const handleListInvites = requireAuth(async (request, env, ctx, params, user) =>
       acceptedAt: r.acceptedAt || null,
       acceptedByEmail: r.acceptedByEmail || null,
       expired: new Date(r.expiresAt).getTime() < Date.now(),
+      businessId: r.businessId || null,
+      businessName: r.businessName || null,
     })),
   });
 });
@@ -496,6 +508,29 @@ const handleAcceptInvite = requireAuth(async (request, env, ctx, params, user) =
     .bind(user.userId, token).run();
   await env.DB.prepare('UPDATE users SET current_workspace_id = ? WHERE id = ?')
     .bind(invite.workspace_id, user.userId).run();
+
+  // Business-scoped invite: guarantee the invitee access to that one business.
+  // If the business is still fully open (no business_members rows), first
+  // snapshot every current workspace member into it so nobody who already
+  // had implicit access loses it — this just switches that business from
+  // "open to all" to an explicit list that includes everyone plus the new
+  // member. Other businesses are left untouched.
+  if (invite.business_id) {
+    const biz = await env.DB.prepare('SELECT id FROM businesses WHERE id = ? AND workspace_id = ?')
+      .bind(invite.business_id, invite.workspace_id).first();
+    if (biz) {
+      const existingRows = await env.DB.prepare('SELECT 1 FROM business_members WHERE business_id = ? LIMIT 1')
+        .bind(invite.business_id).first();
+      if (!existingRows) {
+        await env.DB.prepare(
+          `INSERT INTO business_members (business_id, user_id) SELECT ?, wm.user_id FROM workspace_members wm WHERE wm.workspace_id = ?`
+        ).bind(invite.business_id, invite.workspace_id).run();
+      } else {
+        await env.DB.prepare('INSERT OR IGNORE INTO business_members (business_id, user_id) VALUES (?, ?)')
+          .bind(invite.business_id, user.userId).run();
+      }
+    }
+  }
 
   const ws = await env.DB.prepare('SELECT name FROM workspaces WHERE id = ?').bind(invite.workspace_id).first();
   return json({ ok: true, workspaceId: invite.workspace_id, workspaceName: ws ? ws.name : null });
