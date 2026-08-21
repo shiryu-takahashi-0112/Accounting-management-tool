@@ -2201,7 +2201,6 @@ async function confirmMfmeImport(){
   if(!bizId){ toast('取り込み先の事業を選択してください'); return; }
   const selected = mfmeImport.rows.filter(r=>r.businessUse);
   if(!selected.length){ toast('事業用として選択された取引がありません'); return; }
-  if(!confirm(`選択した${selected.length}件の取引を、科目ごとの月次合計として実績に取り込みます。同一科目・対象月の既存の実績金額は上書きされます。よろしいですか？`)) return;
 
   const groups = new Map(); // key -> {category,parentName,accName,month,sum}
   selected.forEach(r=>{
